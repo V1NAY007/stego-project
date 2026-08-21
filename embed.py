@@ -36,6 +36,13 @@ def parse_args():
     p.add_argument("--message-file", default=None, help="read raw bytes from file")
     p.add_argument("--key", required=True)
     p.add_argument("--repeat", type=int, default=4)
+    p.add_argument("--size", type=int, default=0,
+                   help="resize the cover to SIZE x SIZE first. 0 (default) keeps "
+                        "the cover's NATIVE resolution: both networks are fully "
+                        "convolutional, so any size works, and accuracy improves "
+                        "with size because each message cell covers more pixels. "
+                        "Memory scales with pixel count -- 4K needs ~12 GB, so on "
+                        "a small GPU use --device cpu (~5 min for 4K) or --size.")
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
@@ -64,16 +71,22 @@ def main():
     bits = permute_bits(bits, args.key)  # key layer
     msg = torch.from_numpy(bits.astype(np.float32)).unsqueeze(0).to(device)
 
-    cover = load_image(args.cover, size=cfg["size"]).unsqueeze(0).to(device)
+    cover = load_image(args.cover, size=args.size or None).unsqueeze(0).to(device)
+    h, w = cover.shape[-2:]
 
-    with torch.no_grad():
-        stego = encoder(cover, msg)
+    try:
+        with torch.no_grad():
+            stego = encoder(cover, msg)
+    except torch.cuda.OutOfMemoryError:
+        raise SystemExit(
+            f"out of GPU memory at {w}x{h}. Retry with --device cpu (works, but "
+            f"~5 min for 4K) or cap the size with e.g. --size 1024.")
 
     save_image(stego[0], args.out)
 
     mse = torch.mean((stego - cover) ** 2).item()
     psnr = 99.0 if mse == 0 else 10 * np.log10(1.0 / mse)
-    print(f"embedded {len(data)} bytes -> {args.out}")
+    print(f"embedded {len(data)} bytes -> {args.out}  ({w}x{h})")
     print(f"PSNR vs cover: {psnr:.2f} dB (higher = more invisible)")
     print("Distribute as PNG. Re-saving as JPEG will likely destroy the payload.")
 

@@ -85,12 +85,19 @@ def decode_payload(bits: np.ndarray, repeat: int = 1) -> bytes:
     """
     Inverse of encode_payload. `bits` may be soft (probabilities); we threshold.
     """
-    hard = (np.asarray(bits) > 0.5).astype(np.uint8)
+    soft = np.asarray(bits, dtype=np.float64)
 
     if repeat > 1:
-        usable = (hard.size // repeat) * repeat
-        grouped = hard[:usable].reshape(-1, repeat)
-        hard = (grouped.mean(axis=1) > 0.5).astype(np.uint8)
+        usable = (soft.size // repeat) * repeat
+        # Average the PROBABILITIES, then threshold once (soft-decision decoding).
+        # Thresholding to hard bits first discarded the decoder's confidence:
+        # three copies at 0.49/0.49/0.99 are a 2-1 hard vote for 0, but they
+        # average to 0.66, which is the better call. It also removes the tie bias
+        # at even `repeat`, where 1-vs-1 used to resolve to 0 because the old
+        # majority test was `mean > 0.5`.
+        soft = soft[:usable].reshape(-1, repeat).mean(axis=1)
+
+    hard = (soft > 0.5).astype(np.uint8)
 
     header = hard[:HEADER_BITS]
     n_bytes = _bits_to_int(header)
