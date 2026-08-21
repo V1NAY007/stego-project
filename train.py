@@ -20,6 +20,7 @@ Output: checkpoints/model.pt  (contains encoder+decoder weights and config)
 from __future__ import annotations
 
 import argparse
+import math
 import os
 
 import torch
@@ -29,13 +30,6 @@ from torch.utils.data import DataLoader
 from models import build_models
 from noise_layers import NoisePool
 from data import ImageFolder, SyntheticImages, random_messages
-
-
-def psnr(a: torch.Tensor, b: torch.Tensor) -> float:
-    mse = torch.mean((a - b) ** 2).item()
-    if mse == 0:
-        return 99.0
-    return 10.0 * torch.log10(torch.tensor(1.0 / mse)).item()
 
 
 def parse_args():
@@ -62,10 +56,16 @@ def parse_args():
     p.add_argument("--no-noise", action="store_true", help="disable robustness noise")
     p.add_argument("--out", type=str, default="checkpoints/model.pt")
     p.add_argument("--workers", type=int, default=2,
-                   help="dataloader workers; set near the vCPU count. Full-size "
-                        "JPEG decode is the bottleneck, not the GPU, so on a "
-                        "small-vCPU cloud instance a bigger --batch buys nothing "
-                        "while this is too low.")
+                   help="dataloader workers; set near the vCPU count. Measured on "
+                        "COCO at 128px: 4 workers decode ~834 img/s while the step "
+                        "itself runs at ~70-200 img/s, so this is not the "
+                        "bottleneck -- 4 is plenty and more buys nothing.")
+    p.add_argument("--amp", action="store_true",
+                   help="fp16 autocast + channels_last. ~2x on Ampere and later. "
+                        "OFF by default on purpose: the payload lives at ~10/255, "
+                        "so reduced precision is not free here. Losses are kept in "
+                        "fp32 regardless, but verify bit-acc and PSNR match a "
+                        "non-amp run before trusting a long one.")
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
@@ -95,6 +95,22 @@ def main():
     encoder, decoder, disc = encoder.to(device), decoder.to(device), disc.to(device)
     noise = NoisePool(enabled=not args.no_noise).to(device)
 
+    cuda = device.type == "cuda"
+    amp_on = args.amp and cuda
+    # input shapes are fixed for the whole run, so let cuDNN pick its best algos
+    torch.backends.cudnn.benchmark = cuda
+    if amp_on:
+        encoder = encoder.to(memory_format=torch.channels_last)
+        decoder = decoder.to(memory_format=torch.channels_last)
+        disc = disc.to(memory_format=torch.channels_last)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_on)
+
+    def autocast():
+        return torch.amp.autocast("cuda", dtype=torch.float16, enabled=amp_on)
+
+    print(f"amp={amp_on} channels_last={amp_on} cudnn.benchmark={cuda} "
+          f"workers={args.workers} batch={args.batch}")
+
     opt_ed = torch.optim.Adam(
         list(encoder.parameters()) + list(decoder.parameters()), lr=args.lr)
     opt_d = torch.optim.Adam(disc.parameters(), lr=args.lr)
@@ -120,53 +136,76 @@ def main():
         encoder.train(); decoder.train(); disc.train()
         # ponytail: linear ramp; cosine only if this ever needs tuning
         img_w = args.img_weight * min(1.0, (epoch + 1) / max(args.img_warmup, 1))
-        agg = {"msg": 0.0, "img": 0.0, "acc": 0.0, "psnr": 0.0, "res": 0.0, "n": 0}
+        # accumulate on the GPU. Calling .item() per step forces a sync and stalls
+        # the pipeline -- it cost ~40% of throughput (43 img/s in the loop vs
+        # 70 img/s for the same step in isolation). One sync per epoch instead.
+        agg = {k: torch.zeros((), device=device) for k in ("msg", "mse", "acc")}
+        n = 0
 
         for cover in loader:
-            cover = cover.to(device)
+            cover = cover.to(device, non_blocking=True)
+            if amp_on:
+                cover = cover.contiguous(memory_format=torch.channels_last)
             b = cover.size(0)
             msg = random_messages(b, args.msg_len, device)
 
+            # ONE encoder forward per step. The old code ran a second one for the
+            # generator update; the discriminator only ever sees stego detached, so
+            # it is not part of loss_d's graph and loss_d.backward() cannot free it.
+            # The extra forward was pure waste (~20% of the step).
+            with autocast():
+                stego = encoder(cover, msg)
+
             # ---- train discriminator ----
-            stego = encoder(cover, msg)
-            d_real = disc(cover)
-            d_fake = disc(stego.detach())
-            loss_d = bce(d_real, torch.zeros_like(d_real)) + \
-                     bce(d_fake, torch.ones_like(d_fake))
-            opt_d.zero_grad(); loss_d.backward(); opt_d.step()
+            with autocast():
+                d_real = disc(cover).float()
+                d_fake = disc(stego.detach()).float()
+            loss_d = (bce(d_real, torch.zeros_like(d_real))
+                      + bce(d_fake, torch.ones_like(d_fake)))
+            opt_d.zero_grad(set_to_none=True)
+            scaler.scale(loss_d).backward()
+            scaler.step(opt_d)
 
             # ---- train encoder + decoder ----
-            stego = encoder(cover, msg)
-            noised = noise(stego, cover)
-            logits = decoder(noised)
+            with autocast():
+                logits = decoder(noise(stego, cover)).float()
+                d_on_stego = disc(stego).float()
 
+            # Losses in fp32. The payload lives at ~10/255 and the whole point of
+            # `res` is sub-1/255 behaviour, so this is not a place to give up
+            # mantissa bits -- only the convolutions run reduced precision.
             loss_msg = bce(logits, msg)
-            loss_img = mse(stego, cover)
-            d_on_stego = disc(stego)
+            loss_img = mse(stego.float(), cover)
             loss_adv = bce(d_on_stego, torch.zeros_like(d_on_stego))  # fool disc
 
             loss = (args.msg_weight * loss_msg
                     + img_w * loss_img
                     + args.adv_weight * loss_adv)
-            opt_ed.zero_grad(); loss.backward(); opt_ed.step()
+            opt_ed.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.step(opt_ed)
+            scaler.update()
 
             with torch.no_grad():
-                pred = (torch.sigmoid(logits) > 0.5).float()
-                acc = (pred == msg).float().mean().item()
-                agg["msg"] += loss_msg.item() * b
-                agg["img"] += loss_img.item() * b
-                agg["acc"] += acc * b
-                agg["psnr"] += psnr(stego, cover) * b
-                # residual RMS in 8-bit steps. Below ~1.0 the payload does not
-                # survive PNG rounding -- watch this, not just PSNR.
-                agg["res"] += ((stego - cover).pow(2).mean().sqrt() * 255).item() * b
-                agg["n"] += b
+                agg["acc"] += ((logits > 0.0).float() == msg).float().mean() * b
+                agg["msg"] += loss_msg.detach() * b
+                agg["mse"] += loss_img.detach() * b
+                n += b
 
-        n = max(agg["n"], 1)
+        n = max(n, 1)
+        acc = (agg["acc"] / n).item()
+        msg_loss = (agg["msg"] / n).item()
+        mean_mse = (agg["mse"] / n).item()
+        # PSNR of the mean MSE, which is the standard definition (the old code
+        # averaged per-batch PSNRs, which is not the same number).
+        psnr_db = 10.0 * math.log10(1.0 / max(mean_mse, 1e-12))
+        # residual RMS in 8-bit steps. Below ~1.0 the payload does not survive
+        # PNG rounding -- watch this, not just PSNR.
+        res = math.sqrt(mean_mse) * 255.0
         print(f"epoch {epoch+1:3d}/{args.epochs} | "
-              f"bit-acc {agg['acc']/n:.4f} | PSNR {agg['psnr']/n:5.2f} dB | "
-              f"res {agg['res']/n:4.2f}/255 | img_w {img_w:.2f} | "
-              f"msg {agg['msg']/n:.4f} | img {agg['img']/n:.5f}")
+              f"bit-acc {acc:.4f} | PSNR {psnr_db:5.2f} dB | "
+              f"res {res:4.2f}/255 | img_w {img_w:.2f} | "
+              f"msg {msg_loss:.4f} | img {mean_mse:.5f}")
         # every epoch, not just the last: an epoch here can be 40+ minutes, and a
         # reclaimed spot instance or an OOM would otherwise cost the whole run.
         save()
