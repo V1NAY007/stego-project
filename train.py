@@ -61,6 +61,11 @@ def parse_args():
     p.add_argument("--adv-weight", type=float, default=0.01)
     p.add_argument("--no-noise", action="store_true", help="disable robustness noise")
     p.add_argument("--out", type=str, default="checkpoints/model.pt")
+    p.add_argument("--workers", type=int, default=2,
+                   help="dataloader workers; set near the vCPU count. Full-size "
+                        "JPEG decode is the bottleneck, not the GPU, so on a "
+                        "small-vCPU cloud instance a bigger --batch buys nothing "
+                        "while this is too low.")
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
@@ -81,7 +86,9 @@ def main():
         print(f"found {len(ds)} images")
 
     loader = DataLoader(ds, batch_size=args.batch, shuffle=True,
-                        num_workers=2, drop_last=True)
+                        num_workers=args.workers, drop_last=True,
+                        pin_memory=(device.type == "cuda"),
+                        persistent_workers=args.workers > 0)
 
     encoder, decoder, disc = build_models(
         args.msg_len, hidden=args.hidden, residual_scale=args.residual_scale)
@@ -96,6 +103,18 @@ def main():
     mse = nn.MSELoss()
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+
+    def save():
+        torch.save({
+            "encoder": encoder.state_dict(),
+            "decoder": decoder.state_dict(),
+            "config": {
+                "msg_len": args.msg_len,
+                "hidden": args.hidden,
+                "residual_scale": args.residual_scale,
+                "size": args.size,
+            },
+        }, args.out)
 
     for epoch in range(args.epochs):
         encoder.train(); decoder.train(); disc.train()
@@ -148,17 +167,10 @@ def main():
               f"bit-acc {agg['acc']/n:.4f} | PSNR {agg['psnr']/n:5.2f} dB | "
               f"res {agg['res']/n:4.2f}/255 | img_w {img_w:.2f} | "
               f"msg {agg['msg']/n:.4f} | img {agg['img']/n:.5f}")
+        # every epoch, not just the last: an epoch here can be 40+ minutes, and a
+        # reclaimed spot instance or an OOM would otherwise cost the whole run.
+        save()
 
-    torch.save({
-        "encoder": encoder.state_dict(),
-        "decoder": decoder.state_dict(),
-        "config": {
-            "msg_len": args.msg_len,
-            "hidden": args.hidden,
-            "residual_scale": args.residual_scale,
-            "size": args.size,
-        },
-    }, args.out)
     print(f"saved -> {args.out}")
 
 
