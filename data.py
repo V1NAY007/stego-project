@@ -45,7 +45,16 @@ def save_image(tensor: torch.Tensor, path: str) -> None:
 
 
 def random_messages(batch: int, msg_len: int, device="cpu") -> torch.Tensor:
-    return (torch.rand(batch, msg_len, device=device) > 0.5).float()
+    """
+    Random bits at a random per-image density.
+
+    A fixed density of 0.5 leaves the model untrained for the messages it will
+    actually be given: a framed payload is mostly zero padding (a 2-byte message
+    in 256 bits is ~3% ones), and accuracy drops on exactly the inputs embed.py
+    produces.
+    """
+    density = torch.rand(batch, 1, device=device) * 0.9 + 0.05
+    return (torch.rand(batch, msg_len, device=device) < density).float()
 
 
 class ImageFolder(Dataset):

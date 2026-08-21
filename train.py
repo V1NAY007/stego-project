@@ -51,7 +51,13 @@ def parse_args():
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--msg-weight", type=float, default=1.0)
-    p.add_argument("--img-weight", type=float, default=2.0)
+    p.add_argument("--img-weight", type=float, default=0.7)
+    p.add_argument("--img-warmup", type=int, default=5,
+                   help="epochs to ramp the image loss up from 0. At init the "
+                        "decoder is random, so the message loss is flat while the "
+                        "image loss can be driven to ~0 by shrinking the residual "
+                        "below one 8-bit step -- after which quantization erases "
+                        "it. Ramping lets the decoder learn first. 0 = off.")
     p.add_argument("--adv-weight", type=float, default=0.01)
     p.add_argument("--no-noise", action="store_true", help="disable robustness noise")
     p.add_argument("--out", type=str, default="checkpoints/model.pt")
@@ -93,7 +99,9 @@ def main():
 
     for epoch in range(args.epochs):
         encoder.train(); decoder.train(); disc.train()
-        agg = {"msg": 0.0, "img": 0.0, "acc": 0.0, "psnr": 0.0, "n": 0}
+        # ponytail: linear ramp; cosine only if this ever needs tuning
+        img_w = args.img_weight * min(1.0, (epoch + 1) / max(args.img_warmup, 1))
+        agg = {"msg": 0.0, "img": 0.0, "acc": 0.0, "psnr": 0.0, "res": 0.0, "n": 0}
 
         for cover in loader:
             cover = cover.to(device)
@@ -119,7 +127,7 @@ def main():
             loss_adv = bce(d_on_stego, torch.zeros_like(d_on_stego))  # fool disc
 
             loss = (args.msg_weight * loss_msg
-                    + args.img_weight * loss_img
+                    + img_w * loss_img
                     + args.adv_weight * loss_adv)
             opt_ed.zero_grad(); loss.backward(); opt_ed.step()
 
@@ -130,11 +138,15 @@ def main():
                 agg["img"] += loss_img.item() * b
                 agg["acc"] += acc * b
                 agg["psnr"] += psnr(stego, cover) * b
+                # residual RMS in 8-bit steps. Below ~1.0 the payload does not
+                # survive PNG rounding -- watch this, not just PSNR.
+                agg["res"] += ((stego - cover).pow(2).mean().sqrt() * 255).item() * b
                 agg["n"] += b
 
         n = max(agg["n"], 1)
         print(f"epoch {epoch+1:3d}/{args.epochs} | "
               f"bit-acc {agg['acc']/n:.4f} | PSNR {agg['psnr']/n:5.2f} dB | "
+              f"res {agg['res']/n:4.2f}/255 | img_w {img_w:.2f} | "
               f"msg {agg['msg']/n:.4f} | img {agg['img']/n:.5f}")
 
     torch.save({

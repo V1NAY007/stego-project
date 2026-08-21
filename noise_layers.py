@@ -88,7 +88,13 @@ class NoisePool(nn.Module):
 
     def forward(self, stego, cover):
         if not self.enabled:
-            return self.quant(stego)
+            # Was `return self.quant(stego)` -- so --no-noise still handed the
+            # decoder an 8-bit-rounded image. Any residual below 1/255 rounded
+            # away *exactly*, the decoder saw the bit-identical cover, and the
+            # message loss was pinned at chance with no signal to escape on.
+            # Quantization stays in the enabled pool below (PNG save does round);
+            # it just no longer fires when noise is switched off.
+            return stego
         choice = random.choice(["identity", "gauss", "quant", "blur", "dropout"])
         if choice == "identity":
             return self.identity(stego)
