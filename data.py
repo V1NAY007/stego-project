@@ -58,8 +58,21 @@ def random_messages(batch: int, msg_len: int, device="cpu") -> torch.Tensor:
 
 
 class ImageFolder(Dataset):
-    def __init__(self, root: str, size: int = 128):
+    """
+    size x size training samples, either by resizing the whole image or by
+    taking a random crop at the image's NATIVE scale.
+
+    crop=True matters more than it looks. Resizing a 640x480 photo down to
+    128x128 destroys all pixel-scale detail, so a model trained that way has
+    never seen the statistics of a full-resolution image -- and embedding into
+    one at native resolution then falls apart (bit accuracy 0.999 -> 0.88).
+    Cropping keeps the native pixel scale, so what the encoder learns to write
+    is what it will be asked to write at inference.
+    """
+
+    def __init__(self, root: str, size: int = 128, crop: bool = False):
         self.size = size
+        self.crop = crop
         self.paths = []
         if root and os.path.isdir(root):
             for p in Path(root).rglob("*"):
@@ -71,7 +84,19 @@ class ImageFolder(Dataset):
         return len(self.paths)
 
     def __getitem__(self, idx):
-        return load_image(self.paths[idx], self.size)
+        if not self.crop:
+            return load_image(self.paths[idx], self.size)
+
+        s = self.size
+        img = Image.open(self.paths[idx]).convert("RGB")
+        if img.width < s or img.height < s:   # upscale only what is too small
+            scale = s / min(img.width, img.height)
+            img = img.resize((max(s, int(img.width * scale + 0.5)),
+                              max(s, int(img.height * scale + 0.5))), Image.BICUBIC)
+        x = np.random.randint(0, img.width - s + 1)
+        y = np.random.randint(0, img.height - s + 1)
+        arr = np.asarray(img.crop((x, y, x + s, y + s)), dtype=np.float32) / 255.0
+        return torch.from_numpy(arr).permute(2, 0, 1).contiguous()
 
 
 class SyntheticImages(Dataset):

@@ -54,6 +54,12 @@ def parse_args():
                         "it. Ramping lets the decoder learn first. 0 = off.")
     p.add_argument("--adv-weight", type=float, default=0.01)
     p.add_argument("--no-noise", action="store_true", help="disable robustness noise")
+    p.add_argument("--crop", action="store_true",
+                   help="train on random NATIVE-scale crops instead of resizing "
+                        "each whole image to --size. Use this if you intend to "
+                        "embed at native resolution: resizing a whole photo to "
+                        "128px strips the pixel-scale detail a real cover has, "
+                        "and the model then fails on full-size images.")
     p.add_argument("--out", type=str, default="checkpoints/model.pt")
     p.add_argument("--workers", type=int, default=2,
                    help="dataloader workers; set near the vCPU count. Measured on "
@@ -80,7 +86,7 @@ def main():
         ds = SyntheticImages(n=512, size=args.size)
         print("using SYNTHETIC images")
     else:
-        ds = ImageFolder(args.data, size=args.size)
+        ds = ImageFolder(args.data, size=args.size, crop=args.crop)
         if len(ds) == 0:
             raise SystemExit(f"no images found in {args.data}")
         print(f"found {len(ds)} images")
