@@ -1,8 +1,9 @@
 """
 evaluate.py
 ===========
-Held-out evaluation of a trained encoder/decoder, at NATIVE resolution -- i.e.
-the path `embed.py` / `extract.py` actually take, not the training path.
+Held-out evaluation of a trained encoder/decoder, at NATIVE resolution and
+through the same tiling that `embed.py` / `extract.py` use -- i.e. the real
+path, not the training path.
 
     python evaluate.py --model checkpoints/model_v2.pt \
         --data datasets/coco2017/val2017 --n 60 --key hunter2
@@ -33,7 +34,7 @@ import numpy as np
 import torch
 
 from data import IMG_EXTS, load_image, save_image
-from models import Decoder, Encoder
+from models import Decoder, Encoder, tiled_decode, tiled_encode
 from payload import HEADER_BITS, decode_payload, encode_payload
 from crypto_key import permute_bits, unpermute_bits
 from lsb_analysis import chi_square_pvalue, lsb_embed, lsb_run_length
@@ -48,6 +49,8 @@ def parse_args():
     p.add_argument("--repeats", default="1,2,3,4")
     p.add_argument("--size", type=int, default=0,
                    help="0 = native resolution (what embed.py now does)")
+    p.add_argument("--tile", type=int, default=0,
+                   help="0 (default) = the model's training size, as embed.py uses")
     p.add_argument("--out-dir", default="eval_out")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
@@ -91,17 +94,19 @@ def main():
     if not paths:
         raise SystemExit(f"no images found in {args.data}")
     repeats = [int(r) for r in args.repeats.split(",")]
+    tile = args.tile or cfg.get("size", 128)
     tmp = os.path.join(args.out_dir, "_roundtrip.png")
 
     print(f"model: msg_len={L} trained at {cfg['size']}px | "
           f"{len(paths)} held-out images | "
-          f"{'native resolution' if not args.size else f'{args.size}px'}")
+          f"{'native resolution' if not args.size else f'{args.size}px'} | "
+          f"{tile}px tiles")
 
     # warm up cuDNN autotuning and lazy CUDA init, or the first timed image
     # absorbs all of it and reads ~20x slow
     warm = load_image(str(paths[0]), size=args.size or None).unsqueeze(0).to(device)
-    with torch.no_grad():
-        decoder(encoder(warm, torch.zeros(1, L, device=device)))
+    tiled_decode(decoder, tiled_encode(encoder, warm,
+                                       torch.zeros(1, L, device=device), tile), tile)
     sync(device)
     del warm
 
@@ -128,8 +133,7 @@ def main():
             cover = cover.unsqueeze(0).to(device)
 
             t0 = time.perf_counter()
-            with torch.no_grad():
-                stego = encoder(cover, msg)
+            stego = tiled_encode(encoder, cover, msg, tile)
             sync(device)
             t_emb.append(time.perf_counter() - t0)
 
@@ -138,8 +142,7 @@ def main():
             reloaded = load_image(tmp).unsqueeze(0).to(device)
 
             t0 = time.perf_counter()
-            with torch.no_grad():
-                probs = torch.sigmoid(decoder(reloaded))[0].cpu().numpy()
+            probs = tiled_decode(decoder, reloaded, tile).cpu().numpy()
             sync(device)
             t_ext.append(time.perf_counter() - t0)
 
@@ -186,8 +189,7 @@ def main():
         bits = permute_bits(encode_payload(text, L, repeat=rep0), args.key)
         msg = torch.from_numpy(bits.astype(np.float32)).unsqueeze(0).to(device)
         cover = load_image(str(path), size=args.size or None).unsqueeze(0).to(device)
-        with torch.no_grad():
-            stego = encoder(cover, msg)
+        stego = tiled_encode(encoder, cover, msg, tile)
 
         g_cover = to_gray_u8(cover[0])
         g_stego = to_gray_u8(stego[0].clamp(0, 1))
@@ -215,7 +217,7 @@ def main():
           f"re-quantisation, not that it beats LSB on this particular detector.")
 
     summary = {"model": args.model, "config": cfg, "n_images": len(paths),
-               "native_resolution": not args.size, "rows": rows,
+               "native_resolution": not args.size, "tile": tile, "rows": rows,
                "chi_square_mean": {k: float(np.mean(v)) for k, v in chi.items()},
                "lsb_run_length_mean": {k: float(np.mean(v)) for k, v in runlen.items()}}
     with open(os.path.join(args.out_dir, "summary.json"), "w") as f:

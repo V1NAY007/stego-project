@@ -11,7 +11,8 @@ The output MUST be saved as PNG (done automatically). The message is:
   1. framed with a length header,
   2. repetition-coded (--repeat) for robustness,
   3. permuted by the key,
-  4. embedded by the encoder CNN as a faint whole-image residual.
+  4. embedded by the encoder CNN as a faint residual, tile by tile, so the
+     output keeps the cover's native resolution.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import argparse
 import numpy as np
 import torch
 
-from models import Encoder
+from models import Encoder, tiled_encode
 from data import load_image, save_image
 from payload import encode_payload
 from crypto_key import permute_bits
@@ -38,11 +39,15 @@ def parse_args():
     p.add_argument("--repeat", type=int, default=4)
     p.add_argument("--size", type=int, default=0,
                    help="resize the cover to SIZE x SIZE first. 0 (default) keeps "
-                        "the cover's NATIVE resolution: both networks are fully "
-                        "convolutional, so any size works, and accuracy improves "
-                        "with size because each message cell covers more pixels. "
-                        "Memory scales with pixel count -- 4K needs ~12 GB, so on "
-                        "a small GPU use --device cpu (~5 min for 4K) or --size.")
+                        "the cover's NATIVE resolution -- a 4K cover gives a 4K "
+                        "stego. The image is embedded in TILE x TILE tiles, so "
+                        "every tile matches what the model trained on and accuracy "
+                        "at 4K equals accuracy at 128px. Only resize if you want a "
+                        "smaller output file.")
+    p.add_argument("--tile", type=int, default=0,
+                   help="tile size for native-resolution embedding. 0 (default) "
+                        "uses the model's training size from the checkpoint, which "
+                        "is the only value that keeps tiles in-distribution.")
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
@@ -73,20 +78,20 @@ def main():
 
     cover = load_image(args.cover, size=args.size or None).unsqueeze(0).to(device)
     h, w = cover.shape[-2:]
+    tile = args.tile or cfg.get("size", 128)
+    if min(h, w) < tile:
+        print(f"note: {w}x{h} is smaller than one {tile}px tile -- embedding whole. "
+              f"Accuracy below the training size is not guaranteed.")
 
-    try:
-        with torch.no_grad():
-            stego = encoder(cover, msg)
-    except torch.cuda.OutOfMemoryError:
-        raise SystemExit(
-            f"out of GPU memory at {w}x{h}. Retry with --device cpu (works, but "
-            f"~5 min for 4K) or cap the size with e.g. --size 1024.")
+    stego = tiled_encode(encoder, cover, msg, tile)
 
     save_image(stego[0], args.out)
 
     mse = torch.mean((stego - cover) ** 2).item()
     psnr = 99.0 if mse == 0 else 10 * np.log10(1.0 / mse)
-    print(f"embedded {len(data)} bytes -> {args.out}  ({w}x{h})")
+    n_tiles = (h // tile) * (w // tile)
+    how = f"{n_tiles} tiles of {tile}px" if n_tiles else "whole image"
+    print(f"embedded {len(data)} bytes -> {args.out}  ({w}x{h}, {how})")
     print(f"PSNR vs cover: {psnr:.2f} dB (higher = more invisible)")
     print("Distribute as PNG. Re-saving as JPEG will likely destroy the payload.")
 

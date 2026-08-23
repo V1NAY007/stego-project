@@ -15,7 +15,7 @@ import argparse
 import numpy as np
 import torch
 
-from models import Decoder
+from models import Decoder, tiled_decode
 from data import load_image
 from payload import decode_payload
 from crypto_key import unpermute_bits
@@ -33,6 +33,9 @@ def parse_args():
                         "whatever size it was embedded at, so this needs no "
                         "coordination with embed.py. Only set it if you resized "
                         "the file yourself (which will likely lose the payload).")
+    p.add_argument("--tile", type=int, default=0,
+                   help="must match embed.py. 0 (default) = the model's training "
+                        "size from the checkpoint, same default embed.py uses.")
     p.add_argument("--raw-out", default=None,
                    help="if set, write recovered bytes here instead of printing text")
     p.add_argument("--device", type=str,
@@ -51,13 +54,10 @@ def main():
     decoder.eval()
 
     stego = load_image(args.stego, size=args.size or None).unsqueeze(0).to(device)
-    try:
-        with torch.no_grad():
-            probs = torch.sigmoid(decoder(stego))[0].cpu().numpy()
-    except torch.cuda.OutOfMemoryError:
-        h, w = stego.shape[-2:]
-        raise SystemExit(
-            f"out of GPU memory at {w}x{h}. Retry with --device cpu.")
+    # Every tile carries the same message, so averaging their probabilities is
+    # free error correction on top of --repeat: 480 votes on a 4K image.
+    probs = tiled_decode(decoder, stego,
+                         args.tile or cfg.get("size", 128)).cpu().numpy()
 
     bits = unpermute_bits(probs, args.key)  # undo key layer (on soft values)
     data = decode_payload(bits, repeat=args.repeat)

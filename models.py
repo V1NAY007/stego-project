@@ -156,6 +156,79 @@ def build_models(msg_len: int, hidden: int = 64, residual_scale: float = 0.1):
     )
 
 
+# ---------------------------------------------------------------------------
+# Native-resolution inference by tiling
+# ---------------------------------------------------------------------------
+# The nets are fully convolutional so they RUN at any resolution, but a model
+# trained at S px only decodes reliably at S px: model_v2 goes 1.0000 -> 0.8625
+# bit accuracy when the same image is embedded whole at 4K instead of 128px.
+# The cause is the pixel scale of the residual, not the net's shape -- a
+# well-optimised model has squeezed the residual to ~5/255 and has no margin
+# left to survive being asked for a texture at a scale it never trained on.
+#
+# So don't ask it to. Cut the image into S x S tiles, embed the same message in
+# each, reassemble: every tile is exactly in-distribution, the output is native
+# resolution, and the repeated message across tiles is free redundancy on top of
+# whatever --repeat does. Peak memory is one tile batch, not one 4K image.
+#
+# ponytail: tile borders leave a periodic residual step (measured 2.2/255 at a
+# 128px period vs 0.96/255 inside a tile) -- invisible, but a fixed-period
+# signature. If autocorrelation steganalysis ever matters, derive the grid
+# offset from the key instead of pinning it to (0,0).
+
+
+def _tiles(x: torch.Tensor, t: int):
+    """(1,C,H,W) -> ((N,C,t,t) tiles, (nh,nw) grid), reflect-padded up to a multiple."""
+    h, w = x.shape[-2:]
+    ph, pw = (-h) % t, (-w) % t          # both < t <= min(h,w), so reflect is legal
+    if ph or pw:
+        x = F.pad(x, (0, pw, 0, ph), mode="reflect")
+    nh, nw = x.shape[-2] // t, x.shape[-1] // t
+    return (x.view(1, -1, nh, t, nw, t).permute(0, 2, 4, 1, 3, 5)
+             .reshape(nh * nw, -1, t, t)), (nh, nw)
+
+
+def _untile(tiles: torch.Tensor, grid: tuple[int, int], h: int, w: int) -> torch.Tensor:
+    """Inverse of _tiles, cropped back to the original (h,w)."""
+    nh, nw = grid
+    t = tiles.shape[-1]
+    x = (tiles.view(1, nh, nw, -1, t, t).permute(0, 3, 1, 4, 2, 5)
+              .reshape(1, -1, nh * t, nw * t))
+    return x[..., :h, :w]
+
+
+def _batched(fn, tiles: torch.Tensor, batch: int) -> torch.Tensor:
+    return torch.cat([fn(tiles[i:i + batch]) for i in range(0, len(tiles), batch)])
+
+
+@torch.no_grad()
+def tiled_encode(encoder: nn.Module, cover: torch.Tensor, msg: torch.Tensor,
+                 tile: int, batch: int = 16) -> torch.Tensor:
+    """(1,3,H,W) cover + (1,L) msg -> (1,3,H,W) stego, embedded tile-by-tile."""
+    h, w = cover.shape[-2:]
+    if min(h, w) < tile:                 # too small to tile: one whole-image pass
+        return encoder(cover, msg)
+    tiles, grid = _tiles(cover, tile)
+    out = _batched(lambda x: encoder(x, msg.expand(x.shape[0], -1)), tiles, batch)
+    return _untile(out, grid, h, w)
+
+
+@torch.no_grad()
+def tiled_decode(decoder: nn.Module, stego: torch.Tensor, tile: int,
+                 batch: int = 16) -> torch.Tensor:
+    """(1,3,H,W) stego -> (L,) bit PROBABILITIES, soft-averaged over all tiles."""
+    h, w = stego.shape[-2:]
+    if min(h, w) < tile:
+        return torch.sigmoid(decoder(stego))[0]
+    tiles, (nh, nw) = _tiles(stego, tile)
+    # Vote only with tiles that lie WHOLLY inside the image. The reflect-padded
+    # edge tiles had part of their residual cropped off when the stego was saved,
+    # so they read noise -- averaging them in just dilutes the good tiles.
+    keep = [r * nw + c for r in range(h // tile) for c in range(w // tile)]
+    probs = _batched(lambda x: torch.sigmoid(decoder(x)), tiles[keep], batch)
+    return probs.mean(0)
+
+
 if __name__ == "__main__":
     # Regression guards for the two capacity ceilings. Run: python models.py
     torch.manual_seed(0)
@@ -181,6 +254,15 @@ if __name__ == "__main__":
         feat = dec.pool(dec.body(stego)).flatten(1)
         assert feat.shape[1] >= msg_len, (
             f"decoder bottleneck is back: {feat.shape[1]} features for {msg_len} bits")
+        # 3. tiling must round-trip geometry exactly, at sizes that do NOT
+        #    divide the tile, and must not silently change the output shape.
+        for h, w in [(128, 128), (300, 200), (129, 257)]:
+            big = torch.rand(1, 3, h, w)
+            t, g = _tiles(big, 128)
+            assert torch.equal(_untile(t, g, h, w), big), (h, w)
+            s = tiled_encode(enc, big, msg[:1], 128)
+            assert s.shape == big.shape, (s.shape, big.shape)
+            assert tiled_decode(dec, s, 128).shape == (msg_len,)
     print(f"ok: bit locality max/mean {d.max()/d.mean():.1f}, "
           f"{feat.shape[1]} decoder features -> {msg_len} bits "
-          f"(grid {enc.grid}x{enc.grid})")
+          f"(grid {enc.grid}x{enc.grid}), tiling round-trips")
