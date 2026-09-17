@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Latent Channel — neural steganography</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<div class="app-shell">
+
+  <!-- ============ LEFT: collapsible nav, hidden until hamburger is clicked ============ -->
+  <div class="side-overlay" id="side-overlay" hidden></div>
+  <aside class="side-panel" id="side-panel" hidden>
+    <div class="side-panel-header">
+      <span class="wordmark-text">Latent&nbsp;Channel</span>
+      <button class="icon-btn" id="side-close" aria-label="Close menu">&times;</button>
+    </div>
+    <nav class="side-nav">
+      <button class="side-nav-item is-active" data-mode="embed">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Embed
+      </button>
+      <button class="side-nav-item" data-mode="extract">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M13 8H3M7 4L3 8l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Extract
+      </button>
+      <button class="side-nav-item" data-mode="proof">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5 2 4v4c0 3.5 2.5 5.8 6 6.5 3.5-.7 6-3 6-6.5V4L8 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        Proof
+      </button>
+    </nav>
+    <div class="side-panel-footer">
+      <span id="status-pill" class="status-pill status-pill--pending">
+        <span class="status-dot"></span> checking model&hellip;
+      </span>
+    </div>
+  </aside>
+
+  <!-- ============ MIDDLE: list pane ============ -->
+  <div class="list-panel">
+    <div class="list-header">
+      <button class="icon-btn" id="menu-toggle" aria-label="Open menu">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M2.5 5h13M2.5 9h13M2.5 13h13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+      <span class="list-header-title">Transmissions</span>
+    </div>
+
+    <div class="list-items">
+      <button class="list-item is-active" data-mode="embed">
+        <div class="list-item-icon list-item-icon--embed">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <div class="list-item-body">
+          <div class="list-item-title">Embed a message</div>
+          <div class="list-item-sub">Hide text inside a cover image</div>
+        </div>
+      </button>
+      <button class="list-item" data-mode="extract">
+        <div class="list-item-icon list-item-icon--extract">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M13 8H3M7 4L3 8l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <div class="list-item-body">
+          <div class="list-item-title">Extract a message</div>
+          <div class="list-item-sub">Recover text from a stego image</div>
+        </div>
+      </button>
+      <button class="list-item" data-mode="proof">
+        <div class="list-item-icon list-item-icon--proof">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 1.5 2 4v4c0 3.5 2.5 5.8 6 6.5 3.5-.7 6-3 6-6.5V4L8 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        </div>
+        <div class="list-item-body">
+          <div class="list-item-title">Detection proof</div>
+          <div class="list-item-sub">Why this evades chi-square analysis</div>
+        </div>
+      </button>
+    </div>
+
+    <div class="list-footer">
+      <button class="profile-trigger" id="profile-trigger">
+        <span class="avatar-circle">Y</span>
+        <span class="profile-trigger-text">
+          <span class="profile-name">You</span>
+          <span class="profile-sub">Local session</span>
+        </span>
+      </button>
+      <div class="profile-popover" id="profile-popover" hidden>
+        <div class="profile-popover-row"><span class="avatar-circle avatar-circle--lg">Y</span>
+          <div><div class="profile-name">You</div><div class="profile-sub">operator · this device</div></div>
+        </div>
+        <div class="profile-popover-divider"></div>
+        <div class="profile-popover-item">Model: <span id="popover-model">—</span></div>
+        <div class="profile-popover-item">Capacity: <span id="popover-capacity">—</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ RIGHT: reading pane ============ -->
+  <main class="reading-panel">
+
+    <div class="reading-content" data-panel="embed">
+      <div class="reading-heading">
+        <h1>Embed a message</h1>
+        <p>Choose a cover image and a key. The result carries your text as an invisible residual.</p>
+      </div>
+
+      <div class="form-grid">
+        <div class="form-col">
+          <div class="field">
+            <label class="field-label" for="cover-input">Cover image</label>
+            <div class="dropzone" id="cover-dropzone" tabindex="0">
+              <input type="file" id="cover-input" accept="image/png,image/jpeg,image/bmp,image/webp" hidden>
+              <div class="dropzone-empty">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 16V4M12 4L7 9M12 4l5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="currentColor" stroke-width="1.5"/></svg>
+                <span>drop an image, or click to browse</span>
+                <span class="dropzone-hint">PNG recommended · any resolution</span>
+              </div>
+              <img class="dropzone-preview" id="cover-preview" alt="" hidden>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="message-input">Message</label>
+            <textarea id="message-input" class="text-input" rows="4" placeholder="meet at the docks, midnight"></textarea>
+            <div class="field-note"><span id="byte-count">0</span> bytes · capacity <span id="capacity-note">—</span></div>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="key-input">Key</label>
+            <input type="text" id="key-input" class="text-input" placeholder="hunter2" autocomplete="off">
+          </div>
+
+          <div class="field-row">
+            <div class="field field--narrow">
+              <label class="field-label" for="size-input">Size</label>
+              <input type="number" id="size-input" class="text-input" value="0" min="0" max="4096" step="1">
+            </div>
+          </div>
+          <p class="field-note">0 (default) embeds at the cover’s native resolution · any other value resizes it to Size&times;Size first</p>
+
+          <button class="run-btn" id="embed-btn">
+            <span>Embed message</span>
+          </button>
+          <p class="run-error" id="embed-error" hidden></p>
+        </div>
+
+        <div class="form-col">
+          <div class="result-shell" id="embed-result-shell">
+            <div class="result-empty">
+              <span class="result-empty-glyph">&#9678;</span>
+              <p>The stego image and its invisibility readout will appear here.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="reading-content" data-panel="extract" hidden>
+      <div class="reading-heading">
+        <h1>Extract a message</h1>
+        <p>The correct key is required. A wrong key recovers noise, not an error — by design.</p>
+      </div>
+
+      <div class="form-grid">
+        <div class="form-col">
+          <div class="field">
+            <label class="field-label" for="stego-input">Stego image</label>
+            <div class="dropzone" id="stego-dropzone" tabindex="0">
+              <input type="file" id="stego-input" accept="image/png,image/jpeg,image/bmp,image/webp" hidden>
+              <div class="dropzone-empty">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 16V4M12 4L7 9M12 4l5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="currentColor" stroke-width="1.5"/></svg>
+                <span>drop the stego PNG, or click to browse</span>
+                <span class="dropzone-hint">must be the untouched PNG the encoder wrote</span>
+              </div>
+              <img class="dropzone-preview" id="stego-preview" alt="" hidden>
+            </div>
+          </div>
+
+          <div class="field-row">
+            <div class="field field--grow">
+              <label class="field-label" for="extract-key-input">Key</label>
+              <input type="text" id="extract-key-input" class="text-input" placeholder="hunter2" autocomplete="off">
+            </div>
+          </div>
+
+          <button class="run-btn" id="extract-btn">
+            <span>Extract message</span>
+          </button>
+          <p class="run-error" id="extract-error" hidden></p>
+        </div>
+
+        <div class="form-col">
+          <div class="result-shell" id="extract-result-shell">
+            <div class="result-empty">
+              <span class="result-empty-glyph">&#9678;</span>
+              <p>The recovered message appears here.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="reading-content" data-panel="proof" hidden>
+      <div class="reading-heading">
+        <h1>Why it doesn't look embedded</h1>
+        <p>Classic LSB steganography equalises histogram value-pairs — the exact signature the chi-square pairs-of-values attack (Westfeld&ndash;Pfitzmann) is built to catch. This encoder adds a small continuous residual instead, so the histogram barely moves.</p>
+      </div>
+      <div class="proof-bars">
+        <div class="proof-bar">
+          <div class="proof-bar-track"><div class="proof-bar-fill" style="--pct:2%"></div></div>
+          <div class="proof-bar-label"><span>clean cover</span><span class="proof-bar-val">~0.00</span></div>
+        </div>
+        <div class="proof-bar">
+          <div class="proof-bar-track"><div class="proof-bar-fill proof-bar-fill--accent" style="--pct:3%"></div></div>
+          <div class="proof-bar-label"><span>this encoder's stego</span><span class="proof-bar-val">~0.00</span></div>
+        </div>
+        <div class="proof-bar">
+          <div class="proof-bar-track"><div class="proof-bar-fill proof-bar-fill--alert" style="--pct:97%"></div></div>
+          <div class="proof-bar-label"><span>classic LSB replacement</span><span class="proof-bar-val">~0.97</span></div>
+        </div>
+      </div>
+      <p class="proof-footnote">chi-square p(embedded), 0&ndash;1 · &gt;0.5 flagged suspicious · reference figures from <code>lsb_analysis.py</code>; your embed reports live numbers for that exact pair.</p>
+    </div>
+
+  </main>
+
+</div>
+
+<script src="/static/js/main.js"></script>
+</body>
+</html>
