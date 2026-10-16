@@ -9,12 +9,12 @@ Jointly train the encoder + decoder (+ discriminator) so that:
 Usage
 -----
 Real images:
-    python train.py --data /path/to/images --size 128 --msg-len 256 --epochs 40
+    python train.py --data /path/to/images --size 128 --epochs 40
 
 Smoke test with no dataset (synthetic images, fast):
     python train.py --synthetic --size 64 --msg-len 64 --epochs 2 --batch 8
 
-Output: checkpoints/model.pt  (contains encoder+decoder weights and config)
+Output: checkpoints/model_v3.pt  (contains encoder+decoder weights and config)
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def parse_args():
     p.add_argument("--synthetic", action="store_true",
                    help="train on procedurally generated images (no dataset needed)")
     p.add_argument("--size", type=int, default=128)
-    p.add_argument("--msg-len", type=int, default=256)
+    p.add_argument("--msg-len", type=int, default=496)
     p.add_argument("--hidden", type=int, default=64)
     p.add_argument("--residual-scale", type=float, default=0.1)
     p.add_argument("--epochs", type=int, default=40)
@@ -60,7 +60,7 @@ def parse_args():
                         "embed at native resolution: resizing a whole photo to "
                         "128px strips the pixel-scale detail a real cover has, "
                         "and the model then fails on full-size images.")
-    p.add_argument("--out", type=str, default="checkpoints/model.pt")
+    p.add_argument("--out", type=str, default="checkpoints/model_v3.pt")
     p.add_argument("--workers", type=int, default=2,
                    help="dataloader workers; set near the vCPU count. Measured on "
                         "COCO at 128px: 4 workers decode ~834 img/s while the step "

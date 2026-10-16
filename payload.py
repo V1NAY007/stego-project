@@ -115,9 +115,25 @@ if __name__ == "__main__":
         ("secret meeting @ 9", 4, 1024),   # 18 bytes -> 160 bits * 4 = 640 <= 1024
         ("", 2, 64),
         ("The quick brown fox.", 1, 256),
+        # 496-bit capacity: 60 bytes max at repeat=1
+        ("A" * 60, 1, 496),
+        ("B" * 50, 1, 496),
+        ("x", 1, 496),
+        ("", 1, 496),
+        # 496-bit with repeat=2: (496//2)-16 = 232 payload bits = 29 bytes
+        ("C" * 29, 2, 496),
     ]:
         enc = encode_payload(text.encode(), msg_len, repeat=rep)
-        assert enc.size == msg_len
+        assert enc.size == msg_len, f"size {enc.size} != {msg_len}"
         dec = decode_payload(enc, repeat=rep).decode()
         assert dec == text, (text, dec)
-    print("payload self-check passed")
+
+    # oversize rejection
+    try:
+        encode_payload(b"X" * 61, 496, repeat=1)
+        assert False, "should have raised"
+    except ValueError:
+        pass
+
+    print("payload self-check passed (including 496-bit capacity)")
+

@@ -232,37 +232,41 @@ def tiled_decode(decoder: nn.Module, stego: torch.Tensor, tile: int,
 if __name__ == "__main__":
     # Regression guards for the two capacity ceilings. Run: python models.py
     torch.manual_seed(0)
-    msg_len, hidden, b = 256, 64, 4
-    enc, dec, _ = build_models(msg_len, hidden=hidden)
-    enc.eval(); dec.eval()
-    cover = torch.rand(b, 3, 128, 128)
-    msg = (torch.rand(b, msg_len) > 0.5).float()
-    with torch.no_grad():
-        stego = enc(cover, msg)
-        assert stego.shape == cover.shape, stego.shape
-        assert dec(stego).shape == (b, msg_len)
+    for msg_len in (256, 496):
+        hidden, b = 64, 4
+        enc, dec, _ = build_models(msg_len, hidden=hidden)
+        enc.eval(); dec.eval()
+        cover = torch.rand(b, 3, 128, 128)
+        msg = (torch.rand(b, msg_len) > 0.5).float()
+        with torch.no_grad():
+            stego = enc(cover, msg)
+            assert stego.shape == cover.shape, stego.shape
+            assert dec(stego).shape == (b, msg_len)
 
-        # 1. one bit must move a LOCAL region. A spatially constant msg_map through
-        #    translation-equivariant convs can only move the whole image at once.
-        flipped = msg.clone()
-        flipped[:, 0] = 1.0 - flipped[:, 0]
-        d = (enc(cover, flipped) - stego).abs().mean(dim=(0, 1))
-        assert d.max() > 5 * d.mean(), (
-            f"message is not spatially localised (max/mean {d.max()/d.mean():.1f})")
+            # 1. one bit must move a LOCAL region.
+            flipped = msg.clone()
+            flipped[:, 0] = 1.0 - flipped[:, 0]
+            d = (enc(cover, flipped) - stego).abs().mean(dim=(0, 1))
+            assert d.max() > 5 * d.mean(), (
+                f"message is not spatially localised (max/mean {d.max()/d.mean():.1f})")
 
-        # 2. the message head must see more than `hidden` numbers for the whole msg.
-        feat = dec.pool(dec.body(stego)).flatten(1)
-        assert feat.shape[1] >= msg_len, (
-            f"decoder bottleneck is back: {feat.shape[1]} features for {msg_len} bits")
-        # 3. tiling must round-trip geometry exactly, at sizes that do NOT
-        #    divide the tile, and must not silently change the output shape.
-        for h, w in [(128, 128), (300, 200), (129, 257)]:
-            big = torch.rand(1, 3, h, w)
-            t, g = _tiles(big, 128)
-            assert torch.equal(_untile(t, g, h, w), big), (h, w)
-            s = tiled_encode(enc, big, msg[:1], 128)
-            assert s.shape == big.shape, (s.shape, big.shape)
-            assert tiled_decode(dec, s, 128).shape == (msg_len,)
-    print(f"ok: bit locality max/mean {d.max()/d.mean():.1f}, "
-          f"{feat.shape[1]} decoder features -> {msg_len} bits "
-          f"(grid {enc.grid}x{enc.grid}), tiling round-trips")
+            # 2. the message head must see more than `hidden` numbers for the whole msg.
+            feat = dec.pool(dec.body(stego)).flatten(1)
+            assert feat.shape[1] >= msg_len, (
+                f"decoder bottleneck is back: {feat.shape[1]} features for {msg_len} bits")
+
+        print(f"  msg_len={msg_len}: grid {enc.grid}x{enc.grid}, "
+              f"{feat.shape[1]} decoder features, locality max/mean {d.max()/d.mean():.1f}")
+
+    # 3. tiling must round-trip geometry exactly
+    enc256, dec256, _ = build_models(256, hidden=64)
+    enc256.eval(); dec256.eval()
+    msg1 = (torch.rand(1, 256) > 0.5).float()
+    for h, w in [(128, 128), (300, 200), (129, 257)]:
+        big = torch.rand(1, 3, h, w)
+        t, g = _tiles(big, 128)
+        assert torch.equal(_untile(t, g, h, w), big), (h, w)
+        s = tiled_encode(enc256, big, msg1, 128)
+        assert s.shape == big.shape, (s.shape, big.shape)
+        assert tiled_decode(dec256, s, 128).shape == (256,)
+    print("ok: both capacities pass, tiling round-trips")
